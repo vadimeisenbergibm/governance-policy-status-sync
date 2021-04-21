@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	kubecorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
@@ -143,9 +144,16 @@ func (r *ReconcilePolicy) Reconcile(request reconcile.Request) (reconcile.Result
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, err
 	}
+
+	hubPlcNamespacedName := request.NamespacedName
+	//TODO add constant for "hub-policy-name.open-cluster-management.io"
+	if hubPolicyName,ok := instance.Labels["hub-policy-name.open-cluster-management.io"]; ok {
+	   hubPlcNamespacedName = types.NamespacedName{Namespace: instance.Namespace, Name: hubPolicyName}
+	}
+
 	// get hub policy
 	hubPlc := &policiesv1.Policy{}
-	err = r.hubClient.Get(context.TODO(), request.NamespacedName, hubPlc)
+	err = r.hubClient.Get(context.TODO(), hubPlcNamespacedName, hubPlc)
 	if err != nil {
 		// hub policy not found, it has been deleted
 		if errors.IsNotFound(err) {
@@ -322,6 +330,38 @@ func (r *ReconcilePolicy) Reconcile(request reconcile.Request) (reconcile.Result
 				instance.GetNamespace()))
 		if "true" != os.Getenv("ON_MULTICLUSTERHUB") {
 			hubPlc.Status = instance.Status
+			err = r.hubClient.Status().Update(context.TODO(), hubPlc)
+			if err != nil {
+				reqLogger.Error(err, "Failed to get update policy status on hub")
+				return reconcile.Result{}, err
+			}
+			r.hubRecorder.Event(instance, "Normal", "PolicyStatusSync",
+				fmt.Sprintf("Policy %s status was updated in cluster namespace %s", hubPlc.GetName(),
+					hubPlc.GetNamespace()))
+		}
+
+		//TODO add constant for "hub-policy-name.open-cluster-management.io"
+		if _,ok := instance.Labels["hub-policy-name.open-cluster-management.io"]; ok {
+			hubPlc.Status = policiesv1.PolicyStatus{}
+
+			isCompliant = true
+			reqLogger.Info(fmt.Sprintf("oldStatus.Status = %v", oldStatus.Status))
+			for _, clusterStatus := range oldStatus.Status {
+				if clusterStatus.ComplianceState == policiesv1.NonCompliant {
+					isCompliant = false
+					break
+				} else if clusterStatus.ComplianceState == "" {
+				       isCompliant = false
+				       break
+				}
+			}
+
+			if isCompliant {
+				hubPlc.Status.ComplianceState = policiesv1.Compliant
+			} else {
+				hubPlc.Status.ComplianceState = policiesv1.NonCompliant
+			}
+
 			err = r.hubClient.Status().Update(context.TODO(), hubPlc)
 			if err != nil {
 				reqLogger.Error(err, "Failed to get update policy status on hub")
